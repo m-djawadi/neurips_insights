@@ -90,7 +90,19 @@ neurips-insights --scrape --analyze --llm --start 2019 --end 2024
 
 ## What `--analyze` gives you
 
-A **thematic map** — each cluster with its size, share, trend arrow (↑ rising / ↓ declining), and the 4–6 papers that anchor it. A **relationship graph** — which themes are methodologically adjacent, by centroid cosine similarity. **Conceptual trends** — each theme's slope over time. All persisted to `analysis.json`, which `--llm` turns into named themes, an explanation of how they relate, and a narrative of where the field is heading.
+The output is structured into **five deliverables**, all written to `analysis.json` and printed as a report:
+
+1. **Core themes** — every cluster with size, share, top terms, anchor papers, and a trend arrow.
+2. **Evolution of topics** — each theme's early→late share with a growth ratio (e.g. LLM reasoning `3.3% → 23.5%, ×7.0 rising`). Trends use per-year **share**, not raw counts, so conference growth doesn't make everything look like it's rising.
+3. **Connected areas** — theme pairs linked by centroid similarity *plus evidence*: their shared vocabulary and the **bridge papers** that sit between them (high similarity to both centroids — often the papers importing a method across areas).
+4. **Emerging trends** — an emergence score (recent share × growth acceleration) ranking what's genuinely heating up, not just what's biggest.
+5. **Research niches & gaps** — a niche score (small + internally diverse + intermittent = unconsolidated opportunity), shown against a **saturated** list (large + flattening = mature/crowded).
+
+Trends work even with **as few as two years** in the corpus — the trend tag falls back to an early-vs-late share ratio when there aren't enough years for a regression slope, so themes are never left untagged.
+
+### Anti-hallucination LLM synthesis
+
+`--llm` runs in **two passes**. Pass 1 names each cluster *strictly from its own representative paper titles* (strict-JSON reply, low temperature). Pass 2 writes the five-section report over those **names plus the pre-computed numbers and relationships**, with an explicit instruction not to introduce any theme or statistic not in the evidence. This prevents the failure mode where a model labels clusters from their ID numbers and its own priors rather than the actual papers.
 
 ## Project structure
 
@@ -101,8 +113,9 @@ neurips_insights/
 ├── corpus.py       # streaming JSONL I/O
 ├── scrape.py       # title+abstract scraper (no PDFs)
 ├── embeddings.py   # model auto-select + disk-cached vectors
-├── analyze.py      # clusters, anchors, graph, trends, search, neighbors
-├── llm_deep.py     # names themes from representative papers + narrative
+├── analyze.py      # clustering + orchestrates temporal analysis + search
+├── temporal.py     # trends, emergence/saturation/niche scoring, relationships
+├── llm_deep.py     # two-pass evidence-grounded naming + 5-section report
 ├── stats.py        # shallow keyword view
 ├── topics.py       # legacy BERTopic/KMeans
 └── llm.py          # legacy keyword-based synthesis

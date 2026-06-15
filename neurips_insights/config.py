@@ -16,4 +16,4 @@ DELAY_MAX = 3.5
 
 # Ollama
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3.1"
+OLLAMA_MODEL = "llama3"

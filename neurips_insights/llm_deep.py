@@ -1,9 +1,16 @@
-"""LLM synthesis over the deep-analysis artifact.
+"""Evidence-grounded LLM synthesis over the temporal analysis artifact.
 
-Unlike the keyword-based stage, this feeds the LLM the *representative paper
-titles* of each cluster, the cluster's size/trend, and the relationship graph.
-The model names each theme, explains what binds the papers, describes how themes
-relate, and writes a field-level narrative.
+Why this is structured the way it is:
+
+The earlier version let the model free-associate from cluster *numbers*, which
+produced confident nonsense (e.g. labeling unrelated clusters "Federated
+Learning"). The fix is to (a) feed only verifiable evidence -- representative
+paper TITLES, extracted TERMS, and PRE-COMPUTED scores -- and (b) make naming a
+two-pass process: first the model assigns a name to each cluster from its own
+papers, then we substitute those names into the relationship/trend sections so
+it never reasons about a cluster it hasn't seen the papers for.
+
+The output maps 1:1 to the five requested deliverables.
 """
 
 from __future__ import annotations
@@ -16,12 +23,14 @@ import requests
 from .config import OLLAMA_URL, OLLAMA_MODEL
 
 
-def _ollama(prompt: str, model: str) -> str:
+def _ollama(prompt: str, model: str, temperature: float = 0.2) -> str:
+    """Low temperature: we want grounded labeling, not creative writing."""
     try:
         r = requests.post(
             OLLAMA_URL,
-            json={"model": model, "prompt": prompt, "stream": False},
-            timeout=600,
+            json={"model": model, "prompt": prompt, "stream": False,
+                  "options": {"temperature": temperature}},
+            timeout=900,
         )
         r.raise_for_status()
         return r.json().get("response", "").strip()
@@ -32,73 +41,141 @@ def _ollama(prompt: str, model: str) -> str:
         )
 
 
-def _cluster_block(clusters):
-    lines = []
-    for cl in clusters:
-        papers = "; ".join(
-            f"({p['year']}) {p['title']}" for p in cl["representative_papers"][:5]
+def _name_clusters(clusters, model):
+    """Pass 1: name each cluster strictly from its representative papers.
+
+    Returns {id: name}. We parse a strict JSON reply so names can be reused.
+    """
+    blocks = []
+    for c in clusters:
+        papers = "\n".join(f"      - {p['title']}"
+                           for p in c["representative_papers"][:5])
+        terms = ", ".join(c["top_terms"][:8])
+        blocks.append(
+            f"  Cluster {c['id']}:\n    terms: {terms}\n    papers:\n{papers}"
         )
-        lines.append(
-            f"Cluster {cl['id']} — {cl['size']} papers ({cl['share']*100:.1f}%), "
-            f"trend={cl['trend']}\n  Representative: {papers}"
-        )
-    return "\n".join(lines)
+
+    prompt = f"""You label research clusters from a top ML conference. For EACH
+cluster below, read its representative paper TITLES and TERMS and assign a
+precise 2-5 word research-area name. Base the name ONLY on the evidence shown --
+do not invent areas that aren't supported by these titles.
+
+Return STRICT JSON only, no prose: an object mapping the cluster id (as a string)
+to its name. Example: {{"0": "Offline Reinforcement Learning", "1": "Diffusion Models"}}
+
+CLUSTERS:
+{chr(10).join(blocks)}
+"""
+    raw = _ollama(prompt, model, temperature=0.1)
+    try:
+        start = raw.index("{")
+        end = raw.rindex("}") + 1
+        names = json.loads(raw[start:end])
+        return {int(k): v for k, v in names.items()}
+    except Exception:
+        return {c["id"]: ", ".join(c["top_terms"][:3]).title() for c in clusters}
 
 
-def _rel_block(relationships, clusters):
-    if not relationships:
-        return "(no strong cross-cluster similarities)"
-    by_id = {c["id"]: c for c in clusters}
-    lines = []
-    for e in relationships[:15]:
-        a, b = e["a"], e["b"]
-        if a in by_id and b in by_id:
-            lines.append(f"Cluster {a} ↔ Cluster {b} (similarity {e['similarity']})")
-    return "\n".join(lines)
+def _synthesize(analysis, names, model):
+    """Pass 2: narrative over named themes + computed trends/relationships."""
+    def nm(cid):
+        return names.get(cid, f"#{cid}")
+
+    yrs = analysis.get("years", [])
+    span = f"{yrs[0]}-{yrs[1]}" if len(yrs) == 2 else "the period"
+
+    evo = []
+    for c in sorted(analysis["clusters"],
+                    key=lambda x: -x["trend"]["growth_ratio"]):
+        t = c["trend"]
+        evo.append(f"  {nm(c['id'])}: {t['early_share']*100:.1f}% -> "
+                   f"{t['late_share']*100:.1f}% (x{t['growth_ratio']:.2f}, {t['tag']})")
+
+    rels = []
+    for r in analysis["relationships"][:10]:
+        bridge = r["bridge_papers"][0]["title"] if r["bridge_papers"] else "-"
+        shared = ", ".join(r["shared_terms"][:4]) or "-"
+        rels.append(f"  {nm(r['a'])} <-> {nm(r['b'])} (sim {r['similarity']}); "
+                    f"shared: {shared}; bridge paper: {bridge}")
+
+    emerging = "\n".join(
+        f"  {nm(e['id'])} (emergence {e['emergence']:.3f}, {e['tag']})"
+        for e in analysis["rankings"]["emerging"])
+    niches = "\n".join(
+        f"  {nm(n['id'])} ({n['size']} papers, niche {n['niche']:.3f})"
+        for n in analysis["rankings"]["niches"])
+    saturated = "\n".join(
+        f"  {nm(s['id'])} (saturation {s['saturation']:.3f}, {s['tag']})"
+        for s in analysis["rankings"]["saturated"][:6])
+
+    prompt = f"""You are a senior ML researcher writing an evidence-based trend
+report on a conference over {span} ({analysis['n_papers']} papers). ALL theme
+names, numbers, and relationships below were computed from the data -- treat them
+as ground truth and DO NOT introduce themes or statistics not listed here.
+
+Write five concise sections with these exact headers:
+
+# 1. CORE THEMES
+The dominant research areas and what each is about (one line each, top ~8 by size).
+
+# 2. EVOLUTION OF TOPICS
+Using the early->late shares, say which areas grew, shrank, or held steady, and
+by roughly how much. Distinguish early-period vs recent character of the field.
+
+# 3. CONNECTED / LAYERED AREAS
+Using the relationship pairs (shared terms + bridge papers), explain which areas
+build on or feed into each other, and what the bridge papers suggest about how
+methods transfer. Reference the named themes.
+
+# 4. EMERGING TRENDS
+Interpret the emergence ranking: what's accelerating now and why it likely matters.
+
+# 5. RESEARCH NICHES & GAPS
+Interpret the niche ranking and the saturated list together: where is the field
+crowded (saturated) vs where is there underexplored room (niches)? Give 3-4
+concrete, actionable directions a researcher could pursue, each tied to a named
+theme or a gap between two themes.
+
+Be specific and grounded. No preamble.
+
+=== CORE THEMES (named, by size) ===
+{chr(10).join('  ' + nm(c['id']) + f" [{c['size']} papers]" for c in analysis['clusters'][:12])}
+
+=== EVOLUTION (early->late share) ===
+{chr(10).join(evo)}
+
+=== RELATIONSHIPS (evidence-backed) ===
+{chr(10).join(rels)}
+
+=== EMERGING (ranked) ===
+{emerging}
+
+=== SATURATED (mature/flattening) ===
+{saturated}
+
+=== NICHES (small + unconsolidated) ===
+{niches}
+"""
+    return _ollama(prompt, model, temperature=0.3)
 
 
 def run_llm_deep(analysis_path: str, model: str = OLLAMA_MODEL) -> None:
     if not os.path.exists(analysis_path):
-        raise SystemExit(
-            f"{analysis_path} not found. Run `--analyze` first."
-        )
+        raise SystemExit(f"{analysis_path} not found. Run `--analyze` first.")
     with open(analysis_path, encoding="utf-8") as f:
-        data = json.load(f)
+        analysis = json.load(f)
 
-    clusters = data["clusters"]
-    rels = data.get("relationships", [])
-    yrs = data.get("years", [])
-    span = f"{yrs[0]}–{yrs[1]}" if len(yrs) == 2 else "the corpus"
+    print(f"Pass 1/2: naming themes from representative papers ({model}) ...")
+    names = _name_clusters(analysis["clusters"], model)
 
-    prompt = f"""You are a senior ML researcher analyzing themes at NeurIPS over
-{span} ({data['n_papers']} papers). Each cluster below is defined by its most
-representative papers (closest to the cluster centroid in embedding space) — read
-the TITLES to infer the theme. Do NOT just list keywords.
+    for c in analysis["clusters"]:
+        c["name"] = names.get(c["id"], "")
+    with open(analysis_path, "w", encoding="utf-8") as f:
+        json.dump(analysis, f, ensure_ascii=False, indent=2)
 
-For EACH cluster output:
-  ## <3-6 word theme name>  (Cluster <id>)
-  - **What binds these papers:** one or two sentences on the shared research problem/approach.
-  - **Trajectory:** interpret the trend tag in plain language.
+    print("Named themes:")
+    for c in analysis["clusters"][:12]:
+        print(f"  #{c['id']:>2} -> {c['name']}")
 
-Then two sections:
-
-  # HOW THE THEMES RELATE
-  Use the relationship pairs to explain which themes are methodologically or
-  topically adjacent, and why (2-4 sentences). Reference theme names, not IDs.
-
-  # FIELD NARRATIVE
-  4-6 sentences: the big picture. What is NeurIPS centered on in this period,
-  which directions are ascending vs fading, and what that implies about where
-  the field is heading.
-
-Be specific and concise. No preamble.
-
-CLUSTERS:
-{_cluster_block(clusters)}
-
-RELATIONSHIPS (cosine similarity between cluster centroids):
-{_rel_block(rels, clusters)}
-"""
-
-    print(f"Querying Ollama ({model}) for theme synthesis ...\n")
-    print(_ollama(prompt, model))
+    print(f"\nPass 2/2: synthesizing trend report ...\n")
+    print(_synthesize(analysis, names, model))

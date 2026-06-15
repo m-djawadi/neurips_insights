@@ -131,6 +131,8 @@ def _trends(labels, years, cluster_ids):
 def run_analyze(corpus_path: str, data_dir: str, out_path: str,
                 model_name: str = "auto", n_topics: int = 0,
                 reps: int = 6, force_embed: bool = False) -> Dict[str, Any]:
+    from .temporal import analyze_temporal, print_report
+
     emb, docs, years, titles, urls = embed_corpus(
         corpus_path, data_dir, model_name=model_name, force=force_embed)
 
@@ -142,50 +144,26 @@ def run_analyze(corpus_path: str, data_dir: str, out_path: str,
           + (f", {(labels==-1).sum()} outliers" if -1 in labels else ""))
 
     cents = _centroids(emb, labels, cluster_ids)
-    trends, all_years = _trends(labels, years, cluster_ids)
-    edges = _cluster_graph(cents)
 
-    clusters = []
-    for c in cluster_ids:
-        size = int((labels == c).sum())
-        reps_list = _representative_papers(
-            emb, labels, titles, urls, years, c, cents[c], top=reps)
-        clusters.append({
-            "id": c,
-            "size": size,
-            "share": round(size / len(docs), 4),
-            "trend": trends[c]["tag"],
-            "slope": round(trends[c]["slope"], 6),
-            "representative_papers": reps_list,
-        })
+    # Full temporal + structural analysis (the five deliverables)
+    labels_arr = np.asarray(labels)
+    analysis = analyze_temporal(
+        emb, labels_arr, titles, list(years), docs,
+        cluster_ids, cents, reps=reps)
+    analysis["method"] = method
 
-    clusters.sort(key=lambda x: -x["size"])
+    # Attach URLs to representative papers for traceability
+    title_to_url = {t: u for t, u in zip(titles, urls)}
+    for cl in analysis["clusters"]:
+        for p in cl["representative_papers"]:
+            p["url"] = title_to_url.get(p["title"], "")
 
-    # Console summary (structure only; naming happens in the LLM stage)
-    print(f"\n{'='*60}\n THEMATIC MAP — {len(clusters)} clusters\n{'='*60}")
-    for cl in clusters:
-        arrow = {"rising": "↑", "declining": "↓", "stable": "→", "n/a": " "}[cl["trend"]]
-        print(f"\n● Cluster {cl['id']}  [{cl['size']} papers, "
-              f"{cl['share']*100:.1f}%]  {arrow} {cl['trend']}")
-        for p in cl["representative_papers"][:4]:
-            print(f"    - ({p['year']}) {p['title'][:72]}")
+    print_report(analysis)
 
-    if edges:
-        print(f"\n{'='*60}\n CLUSTER RELATIONSHIPS (most similar pairs)\n{'='*60}")
-        for e in edges[:12]:
-            print(f"  {e['a']} ↔ {e['b']}   sim={e['similarity']}")
-
-    payload = {
-        "n_papers": len(docs),
-        "years": [int(min(all_years)), int(max(all_years))] if all_years else [],
-        "method": method,
-        "clusters": clusters,
-        "relationships": edges,
-    }
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+        json.dump(analysis, f, ensure_ascii=False, indent=2)
     print(f"\nAnalysis written to {out_path}")
-    return payload
+    return analysis
 
 
 # ------------------------- semantic search -------------------------------- #
