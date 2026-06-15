@@ -1,0 +1,6 @@
+# Core (scrape + stats). For topic modeling, install extras:
+#   pip install -e ".[topics]"      # embeddings + KMeans fallback
+#   pip install -e ".[bertopic]"    # full BERTopic path
+#   pip install -e ".[all]"
+requests>=2.28
+beautifulsoup4>=4.11

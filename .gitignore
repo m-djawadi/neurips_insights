@@ -1,0 +1,26 @@
+# Data artifacts
+data/
+*.jsonl
+*.log
+topics.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Models / caches
+.cache/
+*.pt
+*.bin
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
