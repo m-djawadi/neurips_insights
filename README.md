@@ -54,6 +54,11 @@ neurips-insights --search "diffusion models for video generation"
 # "Papers like this one"
 neurips-insights --like "Denoising Diffusion Probabilistic Models"
 
+# Per-theme technical briefs (Methods / Novelty / Use Cases), for experts
+neurips-insights --analyze --llm --briefs          # name themes, then brief them
+neurips-insights --briefs --brief-top 10           # only the 10 largest themes
+neurips-insights --briefs --brief-ids 22,34,5      # specific themes by cluster id
+
 # Force a bigger embedding model (GPU recommended)
 neurips-insights --analyze --model-name best
 
@@ -77,6 +82,7 @@ neurips-insights --scrape --analyze --llm --start 2019 --end 2024
 | `--scrape` | Fetch titles + abstracts (resumable) |
 | `--analyze` | **Deep**: embed → cluster → anchors → graph → trends → `analysis.json` |
 | `--llm` | Ollama names themes from representative papers, + relationships + narrative |
+| `--briefs` | Per-theme **Methods / Novelty / Use Cases** briefs, grounded in each theme's representative abstracts; writes `theme_briefs.md` |
 | `--search QUERY` | Semantic search over the corpus |
 | `--like TITLE` | Papers most similar to one matching `TITLE` |
 | `--stats` | Shallow keyword frequencies + trends (no ML) |
@@ -102,7 +108,11 @@ Trends work even with **as few as two years** in the corpus — the trend tag fa
 
 ### Anti-hallucination LLM synthesis
 
-`--llm` runs in **two passes**. Pass 1 names each cluster *strictly from its own representative paper titles* (strict-JSON reply, low temperature). Pass 2 writes the five-section report over those **names plus the pre-computed numbers and relationships**, with an explicit instruction not to introduce any theme or statistic not in the evidence. This prevents the failure mode where a model labels clusters from their ID numbers and its own priors rather than the actual papers.
+`--llm` runs in **two passes**. Pass 1 names each cluster *strictly from its own representative paper titles* (strict-JSON reply, low temperature, batched in small groups with a deterministic term-based fallback so no theme is ever left unnamed). Pass 2 writes the five-section report over those **names plus the pre-computed numbers and relationships**, with an explicit instruction not to introduce any theme or statistic not in the evidence.
+
+### Per-theme technical briefs
+
+`--briefs` is a separate, depth-first mode for an expert audience. Where `--llm` reasons across all themes at once (for relationships and rankings), `--briefs` reasons about **one theme per call**, grounded in that theme's representative papers enriched with their **abstracts** (pulled from the corpus — titles alone underdetermine methodology). Each brief has three sections: **Methods** (the shared technical pattern), **Novelty** (the specific methodological shift), and **Use Cases** (immediate vs emerging applications, or downstream relevance if the cluster is theoretical). Generating one theme at a time is the structural guarantee against cross-cluster drift: the model only ever sees the papers it's asked to describe, and is told to cite each claim by paper number. Reuses the names from a prior `--llm` pass when available. Output streams to console and to `theme_briefs.md`.
 
 ## Project structure
 
@@ -116,6 +126,7 @@ neurips_insights/
 ├── analyze.py      # clustering + orchestrates temporal analysis + search
 ├── temporal.py     # trends, emergence/saturation/niche scoring, relationships
 ├── llm_deep.py     # two-pass evidence-grounded naming + 5-section report
+├── briefs.py       # per-theme Methods/Novelty/Use-Cases briefs (abstract-grounded)
 ├── stats.py        # shallow keyword view
 ├── topics.py       # legacy BERTopic/KMeans
 └── llm.py          # legacy keyword-based synthesis

@@ -49,6 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="semantic search over the corpus")
     p.add_argument("--like", metavar="TITLE", default=None,
                    help="find papers similar to one matching this title")
+    p.add_argument("--briefs", action="store_true",
+                   help="per-theme Methods/Novelty/Use-Cases technical briefs "
+                        "(grounded in each theme's representative abstracts)")
 
     # Shared
     p.add_argument("--data-dir", default="data", help="where files live (default: data/)")
@@ -79,6 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
     # LLM options
     p.add_argument("--model", default=OLLAMA_MODEL, help="Ollama model name")
 
+    # Briefs options
+    p.add_argument("--brief-ids", default=None,
+                   help="comma-separated cluster ids to brief (default: all)")
+    p.add_argument("--brief-top", type=int, default=None,
+                   help="brief only the N largest themes")
+
     return p
 
 
@@ -86,7 +95,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
     stages = [args.scrape, args.stats, args.topics, args.analyze, args.llm,
-              args.search, args.like]
+              args.search, args.like, args.briefs]
     if not any(stages):
         build_parser().print_help()
         return 1
@@ -132,6 +141,16 @@ def main(argv=None) -> int:
         print("\n== PAPERS LIKE THIS ==")
         run_neighbors(corpus_path, args.data_dir, args.like,
                       model_name=args.model_name, top_k=args.top_k)
+
+    if args.briefs:
+        from .briefs import run_theme_briefs
+        print("\n== THEME BRIEFS (Methods / Novelty / Use Cases) ==")
+        ids = None
+        if args.brief_ids:
+            ids = [int(x) for x in args.brief_ids.split(",") if x.strip()]
+        briefs_out = os.path.join(args.data_dir, "theme_briefs.md")
+        run_theme_briefs(analysis_path, corpus_path, model=args.model,
+                         only_ids=ids, top_n=args.brief_top, out_path=briefs_out)
 
     if args.llm:
         # Prefer the deep analysis artifact; fall back to legacy topics.json
