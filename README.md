@@ -1,12 +1,12 @@
 # NeurIPS Insights
 
-Analyze what NeurIPS papers are *about* — main themes, frequent topics, and trends over time — **without downloading a single PDF**. The pipeline scrapes only titles and abstracts, stores them as a compact streaming corpus, and mines them with three escalating layers: cheap keyword stats, embedding-based topic modeling, and optional LLM synthesis via Ollama.
+Analyze what NeurIPS papers are *about* — themes, conceptual structure, and trends over time — **without downloading a single PDF**. Scrapes only titles and abstracts, embeds them once, and mines that embedding space for a thematic map, cluster relationships, conceptual trends, and semantic search.
 
-Built for low storage and low memory: the corpus is tens of MB of text (vs. hundreds of GB of PDFs), records stream one at a time, and embeddings are computed in bounded batches.
+The headline stage is **`--analyze`**: it clusters papers in embedding space, picks the papers that *anchor* each cluster (closest to the centroid), builds a graph of which themes sit near each other, and tracks each theme's share over time. The LLM stage then **names** each theme by reading its representative paper titles — not keyword bags — and writes how the themes relate plus a field narrative.
 
-## Why titles + abstracts only
+## Why embeddings, not keywords
 
-A title plus abstract is ~1–2 KB. The full proceedings (2006–present, ~50k papers) is well under 100 MB of text — small enough to re-analyze as often as you like, and small enough that scraping is polite and fast. PDFs add hundreds of GB and almost nothing for thematic analysis.
+Keyword counts tell you `training` appears 17 times. They don't tell you that thirty papers are really *the same idea* phrased thirty ways. Embeddings group papers by **meaning**, so paraphrases collapse together, themes emerge that no single keyword names, and "papers like this one" becomes a one-line query.
 
 ## Install
 
@@ -14,108 +14,108 @@ A title plus abstract is ~1–2 KB. The full proceedings (2006–present, ~50k p
 git clone https://github.com/yourname/neurips-insights
 cd neurips-insights
 
-# Core only (scrape + stats) — pure Python, tiny footprint
-pip install -e .
-
-# Add embedding-based topic modeling (KMeans fallback path)
-pip install -e ".[topics]"
-
-# Add the full BERTopic path (UMAP + HDBSCAN)
-pip install -e ".[bertopic]"
-
-# Everything
-pip install -e ".[all]"
+pip install -e .              # core: scrape + shallow stats
+pip install -e ".[analyze]"   # DEEP analysis: embeddings, clusters, search
+pip install -e ".[all]"       # everything incl. legacy BERTopic path
 ```
 
-For `--llm`, install [Ollama](https://ollama.com) and pull a model:
+For `--llm`, install [Ollama](https://ollama.com): `ollama pull llama3.1`.
 
-```bash
-ollama pull llama3.1
-```
-
-## Pipeline at a glance
+## Pipeline
 
 ```
---scrape ──► data/neurips_corpus.jsonl ──┬──► --stats   (keywords + trends, no ML)
-   (titles + abstracts only,             ├──► --topics  (embeddings ► clusters ► data/topics.json)
-    streaming, resumable)                └──► --llm     (Ollama reads topics.json ► named themes + "why")
+--scrape ──► neurips_corpus.jsonl ──► --analyze ──► analysis.json ──► --llm
+ (titles+abstracts,                   (embed once, cache to disk:        (Ollama names themes
+  streaming, resumable)                clusters, anchors, graph,          from representative
+                                       conceptual trends)                 papers; relationships
+                                                                          + narrative)
+            └──► --search "free text query"   (semantic retrieval)
+            └──► --like "a paper title"       (nearest neighbors)
+            └──► --stats                       (shallow keyword view, no ML)
 ```
 
-Scraping and analysis are decoupled. Scrape once; analyze many times offline.
+Embeddings are computed once and cached (`data/emb_*.npy`), keyed on model + corpus size, so every analysis after the first is fast.
 
 ## Usage
 
 ```bash
-# 1. Scrape a range of years (resumable — safe to Ctrl-C and rerun)
-neurips-insights --scrape --start 2020 --end 2024
+# 1. Scrape
+neurips-insights --scrape --start 2019 --end 2024
 
-# 2. Cheapest insight: top terms + rising/falling trends (no ML deps)
-neurips-insights --stats
+# 2. Deep thematic analysis (auto-picks embedding model & cluster count)
+neurips-insights --analyze
 
-# 3. Topic modeling (BERTopic if installed, else embeddings + KMeans)
-neurips-insights --topics --n-topics 20
+# 3. Name themes + relationships + narrative via Ollama
+neurips-insights --analyze --llm
 
-# 4. Turn topic keyword-clusters into named themes + the "why" (Ollama)
-neurips-insights --llm --model llama3.1
+# Semantic search — find papers by meaning, not keywords
+neurips-insights --search "diffusion models for video generation"
 
-# Run the whole pipeline in one go
-neurips-insights --scrape --stats --topics --llm --start 2018 --end 2024
+# "Papers like this one"
+neurips-insights --like "Denoising Diffusion Probabilistic Models"
 
-# Quick smoke test: only 20 papers/year
-neurips-insights --scrape --start 2023 --end 2023 --limit-per-year 20 --stats
+# Force a bigger embedding model (GPU recommended)
+neurips-insights --analyze --model-name best
+
+# Full pipeline
+neurips-insights --scrape --analyze --llm --start 2019 --end 2024
 ```
+
+### Embedding models (`--model-name`)
+
+| Value | Model | Notes |
+|-------|-------|-------|
+| `auto` (default) | bge-large if a GPU is visible, else bge-small | sensible default |
+| `fast` | `BAAI/bge-small-en-v1.5` (384d) | CPU-friendly, strong |
+| `best` | `BAAI/bge-large-en-v1.5` (1024d) | GPU recommended |
+| any HF id | e.g. `sentence-transformers/all-mpnet-base-v2` | passed through |
 
 ### Flags
 
 | Flag | Purpose |
 |------|---------|
-| `--scrape` | Fetch titles + abstracts into the JSONL corpus |
-| `--stats` | Streaming keyword frequencies + year-over-year trend deltas |
-| `--topics` | Embedding-based topic modeling, writes `topics.json` |
-| `--llm` | Ollama synthesis of `topics.json` into named themes |
-| `--start / --end` | Year range to scrape (default 2020–2024) |
-| `--limit-per-year` | Cap papers/year for fast testing |
-| `--n-topics` | Target topic count (`0` = auto, BERTopic only) |
-| `--no-bertopic` | Force the embeddings + KMeans fallback |
-| `--top-n` | How many top terms `--stats` prints |
+| `--scrape` | Fetch titles + abstracts (resumable) |
+| `--analyze` | **Deep**: embed → cluster → anchors → graph → trends → `analysis.json` |
+| `--llm` | Ollama names themes from representative papers, + relationships + narrative |
+| `--search QUERY` | Semantic search over the corpus |
+| `--like TITLE` | Papers most similar to one matching `TITLE` |
+| `--stats` | Shallow keyword frequencies + trends (no ML) |
+| `--topics` | Legacy BERTopic/KMeans path |
+| `--model-name` | Embedding model (`auto`/`fast`/`best`/HF id) |
+| `--n-topics` | Target cluster count (`0` = auto) |
+| `--reps` | Representative papers per cluster |
+| `--top-k` | Results for `--search` / `--like` |
+| `--force-embed` | Ignore the embedding cache |
 | `--model` | Ollama model name |
-| `--data-dir` | Where corpus / logs / topics live (default `data/`) |
 
-## What you get
+## What `--analyze` gives you
 
-**`--stats`** prints papers-per-year, the top terms overall, and the fastest **rising** and **falling** terms (split at the midpoint year) — enough to see classical ML (kernels, boosting, graphical models) give way to transformers, diffusion, and LLMs.
-
-**`--topics`** prints each discovered cluster with its top keywords and size, then the dominant topic per year, and writes `topics.json` (topic keywords + per-year distribution) for the LLM stage.
-
-**`--llm`** feeds only the compact keyword clusters (never raw abstracts in bulk) to Ollama and prints, per topic, a **Name / What / Why**, plus a **BIG PICTURE** paragraph on the field's trajectory.
+A **thematic map** — each cluster with its size, share, trend arrow (↑ rising / ↓ declining), and the 4–6 papers that anchor it. A **relationship graph** — which themes are methodologically adjacent, by centroid cosine similarity. **Conceptual trends** — each theme's slope over time. All persisted to `analysis.json`, which `--llm` turns into named themes, an explanation of how they relate, and a narrative of where the field is heading.
 
 ## Project structure
 
 ```
-neurips-insights/
-├── neurips_insights/
-│   ├── __init__.py
-│   ├── cli.py        # argparse entry point, wires the four stages
-│   ├── config.py     # URLs, paths, delays, Ollama settings
-│   ├── corpus.py     # streaming JSONL read/write (constant memory)
-│   ├── scrape.py     # title+abstract scraper (resumable, no PDFs)
-│   ├── stats.py      # keyword frequencies + trend deltas (pure Python)
-│   ├── topics.py     # embeddings ► BERTopic / KMeans ► topics.json
-│   └── llm.py        # Ollama synthesis of topics into themes
-├── pyproject.toml
-├── requirements.txt
-├── README.md
-├── LICENSE
-└── .gitignore
+neurips_insights/
+├── cli.py          # argparse entry, wires all stages
+├── config.py       # URLs, paths, Ollama settings
+├── corpus.py       # streaming JSONL I/O
+├── scrape.py       # title+abstract scraper (no PDFs)
+├── embeddings.py   # model auto-select + disk-cached vectors
+├── analyze.py      # clusters, anchors, graph, trends, search, neighbors
+├── llm_deep.py     # names themes from representative papers + narrative
+├── stats.py        # shallow keyword view
+├── topics.py       # legacy BERTopic/KMeans
+└── llm.py          # legacy keyword-based synthesis
 ```
 
 ## Design notes
 
-- **Streaming everywhere.** The scraper flushes each record to disk immediately (crash-safe, resumable via a hash log). Stats stream the corpus line-by-line. Only topic modeling holds a matrix in RAM — and that's just `n_docs × 384` float32s (~75 MB for 50k papers).
-- **Embeddings over TF-IDF for topics.** Clusters form in semantic space, so paraphrases group together; TF-IDF is used only *after* clustering, c-TF-IDF style, to label each cluster with distinctive terms.
-- **The LLM never sees the raw corpus.** It reads compact keyword lists from `topics.json`, so the synthesis cost is constant regardless of how many papers you scraped.
-- **Polite scraping.** Randomized 1.5–3.5s delay between requests; metadata pulled from `citation_*` meta tags with a longest-paragraph fallback for older pages.
+- **Embed once, analyze many.** Vectors cache to disk keyed on (model, corpus size). Re-running `--analyze`, `--search`, `--like` reuses them.
+- **Anchors over keywords.** Clusters are labeled by the papers nearest their centroid, so the LLM reasons over real titles, not term-frequency noise.
+- **bge with the right prompts.** Documents and queries get bge's recommended instruction prefixes for retrieval-quality embeddings.
+- **Bounded memory.** Only the `n_docs × dim` float32 matrix is held; the corpus itself streams from disk.
 
 ## License
 
 MIT
+

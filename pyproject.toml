@@ -19,14 +19,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Embedding-based topic modeling
+# Deep embedding-native analysis (clusters, search, neighbors, trends)
+analyze = [
+    "sentence-transformers>=2.2",
+    "scikit-learn>=1.2",
+    "numpy>=1.23",
+    "hdbscan>=0.8",
+]
+# Embedding-based topic modeling (legacy --topics path)
 topics = [
     "sentence-transformers>=2.2",
     "scikit-learn>=1.2",
     "scipy>=1.9",
     "numpy>=1.23",
 ]
-# Richer topic path
+# Richer legacy topic path
 bertopic = [
     "bertopic>=0.16",
     "sentence-transformers>=2.2",
@@ -35,7 +42,7 @@ bertopic = [
     "hdbscan>=0.8",
 ]
 all = [
-    "neurips-insights[topics,bertopic]",
+    "neurips-insights[analyze,topics,bertopic]",
 ]
 
 [project.scripts]
