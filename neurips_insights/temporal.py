@@ -42,20 +42,37 @@ import numpy as np
 
 _TOKEN = re.compile(r"[a-z][a-z\-]{2,}")
 _STOP = set(
-    """the of and to for with that this our are from using use used new novel via
-    based learning model models method methods approach problem data results show
-    propose proposed paper algorithm framework neural network networks deep towards
-    can we is on an as by it its their such these those between two more most than
-    when each into over under against efficient effective scalable robust general
-    improving improved improve toward analysis study learn learning train training
-    strong results state achieve performance accuracy empirical experiments benchmark
-    framework approach task tasks setting settings problem method methods scalable""".split()
+    """a about above after again against all am an and any are aren't as at be because
+    been before being below between both but by can cannot could couldn't did didn't do
+    does doesn't doing don't down during each few for from further had hadn't has hasn't
+    have haven't having he he'd he'll he's her here here's hers herself him himself his
+    how how's i i'd i'll i'm i've if in into is isn't it it's its itself let's me more
+    most mustn't my myself no nor not of off on once only or other ought our ours
+    ourselves out over own same shan't she she'd she'll she's should shouldn't so some
+    such than that that's the their theirs them themselves then there there's these they
+    they'd they'll they're they've this those through to too under until up very was
+    wasn't we we'd we'll we're we've were weren't what what's when when's where where's
+    which while who who's whom why why's with won't would wouldn't you you'd you'll
+    you're you've your yours yourself yourselves
+    via using use used new novel based approach approaches method methods propose
+    proposed paper framework towards toward show shows showing demonstrate demonstrates
+    achieve achieves achieved improve improved improving improvement results result
+    performance accuracy empirical experiments experiment benchmark benchmarks task
+    tasks setting settings problem problems study studies work works analysis present
+    presents introduce introduces propose proposed however moreover furthermore thus
+    therefore hence also additionally available https github com org net existing
+    extensive state-of-the-art sota baselines baseline different various several many
+    multiple single first second recent recently general generic specific particular""".split()
 )
+
+# Terms appearing in more than this fraction of clusters are too generic to label
+# (e.g. "learning", "model"); auto-detected per corpus rather than hand-listed.
+_MAX_CLUSTER_DF = 0.5
 
 
 def _terms(text: str):
     for w in _TOKEN.findall(text.lower()):
-        if w not in _STOP:
+        if w not in _STOP and len(w) > 2:
             yield w
 
 
@@ -90,9 +107,14 @@ def _trend_tag(year_to_share: Dict[int, float], all_years: List[int]):
     mid = len(all_years) // 2
     early = np.mean(ys[:mid]) if mid > 0 else ys[0]
     late = np.mean(ys[mid:])
-    # growth ratio with smoothing so zero-early doesn't explode
-    eps = 1e-4
-    ratio = (late + eps) / (early + eps)
+    # Growth ratio with a meaningful smoothing floor. Using a tiny eps lets a
+    # theme that went 0.0%→1.8% report ×179, which is noise, not signal. We
+    # smooth by a floor tied to typical share (1 / n_clusters-ish ≈ a few %),
+    # then CAP the reported ratio so "grew from near-zero" reads as a strong but
+    # bounded signal rather than an explosive artifact.
+    floor = 0.01  # 1% share — below this, treat as "barely present"
+    ratio = (late + floor) / (early + floor)
+    ratio = min(ratio, 10.0)  # cap: anything >10x is "exploded from ~nothing"
 
     slope = 0.0
     if len(all_years) >= 3:
@@ -213,11 +235,49 @@ def analyze_temporal(emb, labels, titles, years, docs,
     cluster_terms: Dict[int, Counter] = {}
     cluster_records = []
 
+    # ---- PASS A: collect raw term counts per cluster ----
+    raw_counts: Dict[int, Counter] = {}
+    cluster_order: Dict[int, np.ndarray] = {}
+    for c in cluster_ids:
+        idx = np.where(labels == c)[0]
+        sims_c = emb[idx] @ centroids[c]
+        order = idx[np.argsort(-sims_c)]
+        cluster_order[c] = order
+        tc = Counter()
+        for i in order[: min(60, len(order))]:
+            tc.update(set(_terms(docs[i])))
+        raw_counts[c] = tc
+
+    # ---- cross-cluster document frequency: in how many clusters does a term appear? ----
+    n_clusters = len(cluster_ids)
+    term_cluster_df = Counter()
+    for c in cluster_ids:
+        for t in raw_counts[c]:
+            term_cluster_df[t] += 1
+
+    def distinctive(counter: Counter, k: int = 8):
+        """c-TF-IDF-style: term frequency in cluster x inverse cluster-frequency.
+
+        Down-weights terms that show up across many clusters (generic filler that
+        survived the stopword list) and rewards terms specific to this cluster.
+        Also hard-drops terms present in > _MAX_CLUSTER_DF of all clusters.
+        """
+        scored = []
+        for t, freq in counter.items():
+            df = term_cluster_df[t]
+            if df > _MAX_CLUSTER_DF * n_clusters:
+                continue                       # too generic, skip entirely
+            idf = math.log((n_clusters + 1) / (df + 0.5))
+            scored.append((freq * idf, t))
+        scored.sort(reverse=True)
+        return [t for _, t in scored[:k]]
+
+    # ---- PASS B: build records using distinctive terms ----
     for c in cluster_ids:
         idx = np.where(labels == c)[0]
         size = len(idx)
+        order = cluster_order[c]
         sims = emb[idx] @ centroids[c]
-        order = idx[np.argsort(-sims)]
 
         # representative papers
         rep_idx = order[:reps]
@@ -225,12 +285,13 @@ def analyze_temporal(emb, labels, titles, years, docs,
                        "similarity": round(float(emb[i] @ centroids[c]), 3)}
                       for i in rep_idx]
 
-        # vocabulary from top-N representative docs
-        term_counter = Counter()
-        for i in order[: min(40, size)]:
-            term_counter.update(set(_terms(docs[i])))
-        cluster_terms[c] = term_counter
-        top_terms = [t for t, _ in term_counter.most_common(8)]
+        # distinctive vocabulary (filtered + weighted)
+        top_terms = distinctive(raw_counts[c], k=8)
+        # keep a filtered counter for shared-term evidence in relationships
+        cluster_terms[c] = Counter({
+            t: raw_counts[c][t] for t in raw_counts[c]
+            if term_cluster_df[t] <= _MAX_CLUSTER_DF * n_clusters
+        })
 
         # trend
         tag, early, late, ratio, slope = _trend_tag(share[c], all_years)

@@ -41,39 +41,65 @@ def _ollama(prompt: str, model: str, temperature: float = 0.2) -> str:
         )
 
 
+def _fallback_name(cluster):
+    """Deterministic name from distinctive terms — used when the LLM fails."""
+    terms = cluster.get("top_terms", [])[:3]
+    if terms:
+        return " ".join(t.capitalize() for t in terms)
+    return f"Cluster {cluster['id']}"
+
+
+_BAD_NAMES = {"", "not available", "n/a", "na", "unknown", "none", "unnamed"}
+
+
 def _name_clusters(clusters, model):
-    """Pass 1: name each cluster strictly from its representative papers.
+    """Name each cluster from its representative papers.
 
-    Returns {id: name}. We parse a strict JSON reply so names can be reused.
+    Batched in small groups (large batches make small models emit placeholder
+    'Not Available' values). Any missing/placeholder name falls back to a
+    deterministic term-based label, so no cluster is ever left unnamed.
     """
-    blocks = []
-    for c in clusters:
-        papers = "\n".join(f"      - {p['title']}"
-                           for p in c["representative_papers"][:5])
-        terms = ", ".join(c["top_terms"][:8])
-        blocks.append(
-            f"  Cluster {c['id']}:\n    terms: {terms}\n    papers:\n{papers}"
-        )
+    names = {}
+    BATCH = 8
+    for start in range(0, len(clusters), BATCH):
+        chunk = clusters[start:start + BATCH]
+        blocks = []
+        for c in chunk:
+            papers = "\n".join(f"      - {p['title']}"
+                               for p in c["representative_papers"][:5])
+            terms = ", ".join(c["top_terms"][:8])
+            blocks.append(
+                f"  Cluster {c['id']}:\n    terms: {terms}\n    papers:\n{papers}"
+            )
 
-    prompt = f"""You label research clusters from a top ML conference. For EACH
-cluster below, read its representative paper TITLES and TERMS and assign a
-precise 2-5 word research-area name. Base the name ONLY on the evidence shown --
-do not invent areas that aren't supported by these titles.
+        prompt = f"""You label research clusters from a top ML conference. For EACH
+cluster below, read its representative paper TITLES and assign a precise 2-5 word
+research-area name (e.g. "Offline Reinforcement Learning", "Diffusion Models",
+"Differential Privacy"). Every cluster has a clear theme from its titles — you
+must name all of them. Never answer "Not Available".
 
-Return STRICT JSON only, no prose: an object mapping the cluster id (as a string)
-to its name. Example: {{"0": "Offline Reinforcement Learning", "1": "Diffusion Models"}}
+Return STRICT JSON only: an object mapping each cluster id (as a string) to its
+name. Example: {{"3": "Generalization Bounds", "5": "Text-to-Image Generation"}}
 
 CLUSTERS:
 {chr(10).join(blocks)}
 """
-    raw = _ollama(prompt, model, temperature=0.1)
-    try:
-        start = raw.index("{")
-        end = raw.rindex("}") + 1
-        names = json.loads(raw[start:end])
-        return {int(k): v for k, v in names.items()}
-    except Exception:
-        return {c["id"]: ", ".join(c["top_terms"][:3]).title() for c in clusters}
+        raw = _ollama(prompt, model, temperature=0.1)
+        parsed = {}
+        try:
+            s = raw.index("{")
+            e = raw.rindex("}") + 1
+            parsed = {int(k): v.strip() for k, v in json.loads(raw[s:e]).items()}
+        except Exception:
+            parsed = {}
+
+        for c in chunk:
+            name = parsed.get(c["id"], "")
+            if not name or name.strip().lower() in _BAD_NAMES:
+                name = _fallback_name(c)   # deterministic, never blank
+            names[c["id"]] = name
+
+    return names
 
 
 def _synthesize(analysis, names, model):
